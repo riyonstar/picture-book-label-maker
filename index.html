@@ -121,9 +121,10 @@ html, body {
 .stack { display: flex; flex-direction: column; gap: 8px; }
 .stack .btn { width: 100%; }
 .note { margin: 0; font-size: 12px; color: var(--sub); }
-.manual { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
-.manual summary { cursor: pointer; font-weight: 600; font-size: 14px; }
-.manual-row { display: flex; gap: 8px; margin: 10px 0 4px; }
+.manual { display: flex; flex-direction: column; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+.manual h2 { margin: 0; font-size: 16px; }
+.manual .status { margin: 0; word-break: break-all; }
+.manual-row { display: flex; gap: 8px; }
 .manual-row input { flex: 1; min-width: 0; }
 
 .nobarcode { display: flex; flex-direction: column; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
@@ -328,7 +329,40 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return null;
   }
 
-  E.isbn = { digits, isbn13Valid, isbn10Valid, isbn10to13, normalize };
+  const FIX = { O: '0', o: '0', I: '1', l: '1', '|': '1', B: '8', S: '5', Z: '2' };
+
+  function window13(d) {
+    for (let i = 0; i + 13 <= d.length; i++) {
+      const w = d.slice(i, i + 13);
+      if (/^97[89]\d{10}$/.test(w) && isbn13Valid(w)) return w;
+    }
+    return null;
+  }
+
+  /**
+   * 文字認識(OCR)の結果から ISBN を取り出す。13桁に正規化して返す。見つからなければ null。
+   * 「ISBN978-4-…」のラベルつきを優先し、ハイフン・空白・O/l など数字の読み違いを補正する。
+   * 13桁はチェックディジットで検証するので、誤読した数字は採用されない。
+   */
+  function extract(text) {
+    const lines = String(text || '').split(/\r?\n/);
+    for (const line of lines) {
+      const m = /I\s*[S5]\s*[B8]\s*N(.*)$/i.exec(line);
+      if (!m) continue;
+      const d = m[1].slice(0, 40).replace(/[OoIl|BSZ]/g, (c) => FIX[c]).replace(/[^0-9Xx]/g, '').toUpperCase();
+      const w = window13(d);
+      if (w) return w;
+      if (d.length >= 10 && isbn10Valid(d.slice(0, 10))) return isbn10to13(d.slice(0, 10));
+    }
+    // ラベルが読めなかったとき：数字だけの並びから 978/979 始まりの13桁を探す
+    for (const t of [...lines.map((l) => l.replace(/\D/g, '')), String(text || '').replace(/\D/g, '')]) {
+      const w = window13(t);
+      if (w) return w;
+    }
+    return null;
+  }
+
+  E.isbn = { digits, isbn13Valid, isbn10Valid, isbn10to13, normalize, extract };
 })((window.Ehon = window.Ehon || {}));
 
 /* ==== store.js ==== */
@@ -866,6 +900,119 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
   }
 
   E.barcode = { startCamera, scanImage, scanGray, toGray, accept, decodeRow };
+})((window.Ehon = window.Ehon || {}));
+
+/* ==== ocr.js ==== */
+/*
+ * 印刷された ISBN の数字を読み取る（OCR）。
+ * iPhone Safari には文字認識の標準機能が無いため、Tesseract.js を CDN から必要になったときだけ読み込む。
+ * 初回は認識エンジンと英数字データ（数MB）をダウンロードする。通信が必要。
+ */
+(function (E) {
+  'use strict';
+
+  const TESS_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  let workerPromise = null;
+  let statusCb = null;
+
+  function loadScript(url) {
+    return new Promise((resolve, reject) => {
+      if (window.Tesseract) return resolve();
+      const el = document.createElement('script');
+      el.src = url;
+      el.onload = () => resolve();
+      el.onerror = () => reject(new Error('文字認識エンジンを読み込めませんでした（通信を確認してください）'));
+      document.head.appendChild(el);
+    });
+  }
+
+  function logger(m) {
+    if (!statusCb || !m || !m.status) return;
+    const pct = typeof m.progress === 'number' ? ' ' + Math.round(m.progress * 100) + '%' : '';
+    if (/loading|initializ/i.test(m.status)) statusCb('認識エンジンを準備しています（初回のみ数MB）…' + pct);
+    else if (/recogniz/i.test(m.status)) statusCb('数字を読み取っています…' + pct);
+  }
+
+  function getWorker() {
+    if (!workerPromise) {
+      workerPromise = (async () => {
+        await loadScript(TESS_URL);
+        const w = await window.Tesseract.createWorker('eng', 1, { logger });
+        // ISBN に使う文字だけを認識対象にして、誤読を減らす。PSM 11 = 散らばった文字（背表紙・裏表紙向け）
+        await w.setParameters({ tessedit_char_whitelist: '0123456789-ISBNXx ', tessedit_pageseg_mode: '11' });
+        return w;
+      })();
+      workerPromise.catch(() => { workerPromise = null; });
+    }
+    return workerPromise;
+  }
+
+  /** 画像を回転・縮小し、グレースケール化とコントラスト補正をした canvas にする。 */
+  function prepare(img, angle, maxDim = 1800) {
+    const w0 = img.naturalWidth;
+    const h0 = img.naturalHeight;
+    const s = Math.min(1, maxDim / Math.max(w0, h0));
+    const w = Math.round(w0 * s);
+    const h = Math.round(h0 * s);
+    const swap = angle === 90 || angle === 270;
+    const c = document.createElement('canvas');
+    c.width = swap ? h : w;
+    c.height = swap ? w : h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.translate(c.width / 2, c.height / 2);
+    ctx.rotate((angle * Math.PI) / 180);
+    ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    const d = ctx.getImageData(0, 0, c.width, c.height);
+    const px = d.data;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < px.length; i += 4) {
+      const g = (77 * px[i] + 150 * px[i + 1] + 29 * px[i + 2]) >> 8;
+      px[i] = g;
+      hist[g]++;
+    }
+    const total = c.width * c.height;
+    let lo = 0, hi = 255, acc = 0;
+    while (lo < 255 && (acc += hist[lo]) < total * 0.02) lo++;
+    acc = 0;
+    while (hi > 0 && (acc += hist[hi]) < total * 0.02) hi--;
+    const span = Math.max(40, hi - lo);
+    for (let i = 0; i < px.length; i += 4) {
+      const v = Math.max(0, Math.min(255, ((px[i] - lo) * 255) / span));
+      px[i] = px[i + 1] = px[i + 2] = v;
+      px[i + 3] = 255;
+    }
+    ctx.putImageData(d, 0, 0);
+    return c;
+  }
+
+  /**
+   * @param {HTMLImageElement} img
+   * @param {(msg:string)=>void} onStatus 進行状況の表示用
+   * @returns {Promise<{isbn:string|null, text:string}>} text は認識できた文字（失敗時の確認用）
+   */
+  async function readIsbn(img, onStatus) {
+    statusCb = onStatus || null;
+    const worker = await getWorker();
+    let all = '';
+    // 背表紙の縦書き・横向きの撮影に備えて向きを変えて試し、だめなら縮尺を変えてもう一度試す
+    const passes = [[1800, [0, 90, 270, 180]], [1100, [0, 90, 270]]];
+    for (const [maxDim, angles] of passes) {
+      for (const angle of angles) {
+        if (statusCb && (angle || maxDim < 1800)) statusCb('向きや大きさを変えて読み取っています…');
+        const res = await worker.recognize(prepare(img, angle, maxDim));
+        const text = (res && res.data && res.data.text) || '';
+        const isbn = E.isbn.extract(text);
+        if (isbn) return { isbn, text };
+        all += text.trim() + '\n';
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+    return { isbn: E.isbn.extract(all), text: all.trim() };
+  }
+
+  E.ocr = { readIsbn, prepare };
 })((window.Ehon = window.Ehon || {}));
 
 /* ==== cover.js ==== */
@@ -1531,7 +1678,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
   /** 写真選択ボタン（非表示の file input を押す） */
   function photoButton(label, onFile, cls = '', capture = false) {
     const input = h('input', {
-      type: 'file', accept: 'image/*', class: 'hidden', 'data-testid': capture ? 'shoot-input' : 'photo-input',
+      type: 'file', accept: 'image/*', class: 'hidden', 'data-testid': typeof capture === 'string' ? capture : capture ? 'shoot-input' : 'photo-input',
       capture: capture ? 'environment' : null,
       onChange: (e) => {
         const f = e.target.files && e.target.files[0];
@@ -1593,6 +1740,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     const scanArea = c.scanArea || h('div', { class: 'scan-area' }, scanPlaceholder());
     let manual;
     let titleInput;
+    const ocrOut = h('p', { class: 'status', 'data-testid': 'ocr-status', 'aria-live': 'polite', hidden: true });
     const results = h('div', { class: 'results', 'data-testid': 'results', 'aria-live': 'polite' });
     const search = () => (c.onSearch || noop)(titleInput.value, results);
     return h('main', { class: 'screen add', 'data-screen': 'add' },
@@ -1602,6 +1750,17 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       h('div', { class: 'stack' },
         photoButton('写真から選択', c.onPhoto, ''),
         h('p', { class: 'note' }, 'バーコードの写真を読み取ります。読み取れない場合は、その写真を表紙として登録できます。')
+      ),
+      h('section', { class: 'manual', 'data-testid': 'manual' },
+        h('h2', {}, 'ISBNを手入力'),
+        h('div', { class: 'manual-row' },
+          (manual = h('input', { type: 'text', inputmode: 'numeric', placeholder: '例: 9784000000000', 'aria-label': 'ISBN', 'data-testid': 'isbn-input', enterkeyhint: 'search',
+            onKeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); (c.onManual || noop)(manual.value); } } })),
+          btn('検索', () => (c.onManual || noop)(manual.value), 'small primary')
+        ),
+        photoButton('カメラで撮影してISBNを読み取る', (f) => (c.onIsbnShoot || noop)(f, ocrOut), '', 'isbn-shoot-input'),
+        h('p', { class: 'note' }, '絵本の背表紙や裏表紙に印刷された「ISBN978-…」の数字を撮影すると、自動で読み取ります（バーコードも読み取れます）。数字を大きく、まっすぐ写してください。'),
+        ocrOut
       ),
       h('section', { class: 'nobarcode', 'data-testid': 'nobarcode' },
         h('h2', {}, 'バーコードがないとき'),
@@ -1620,13 +1779,6 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         h('p', { class: 'note' }, '「探す」は書名から表紙つきの候補を表示します。「題名だけで登録」は題名を大きく入れた文字のラベルを作ります。'),
         h('p', { class: 'note' }, 'ヒットしにくいときは ', h('a', { href: '#/settings' }, '楽天ブックス検索の設定'), ' をすると見つかりやすくなります。'),
         results
-      ),
-      h('details', { class: 'manual' },
-        h('summary', {}, 'ISBNを手入力する'),
-        h('div', { class: 'manual-row' },
-          (manual = h('input', { type: 'text', inputmode: 'numeric', placeholder: '例: 9784000000000', 'aria-label': 'ISBN', 'data-testid': 'isbn-input' })),
-          btn('検索', () => (c.onManual || noop)(manual.value), 'small primary')
-        )
       )
     );
   }
@@ -2038,6 +2190,35 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     });
   }
 
+  /** 写真から ISBN を読み取る：まずバーコード、読めなければ印刷された数字を文字認識(OCR)。 */
+  let ocrBusy = false;
+  async function readIsbnFromPhoto(file, out) {
+    if (ocrBusy) return;
+    ocrBusy = true;
+    const set = (text, kind) => { out.hidden = false; out.textContent = text; out.className = 'status ' + (kind || ''); };
+    try {
+      set('写真を読み取っています…', 'info');
+      const img = await E.imaging.fileToImage(file);
+      let code = await E.barcode.scanImage(img);
+      if (!code) {
+        set('数字を読み取っています…（初回は認識エンジンを読み込むため、少し時間がかかります）', 'info');
+        const r = await E.ocr.readIsbn(img, (m) => set(m, 'info'));
+        code = r.isbn;
+        if (!code) {
+          const seen = (r.text || '').replace(/\s+/g, ' ').slice(0, 60);
+          set('ISBNを読み取れませんでした。「ISBN978-…」の数字を大きく、まっすぐ・明るく写して撮り直すか、上の欄に手入力してください。' + (seen ? '（認識した文字：' + seen + '）' : ''), 'warn');
+          return;
+        }
+      }
+      set('ISBN ' + code + ' を読み取りました', 'ok');
+      if (location.hash === '#/add') onIsbn(code);
+    } catch (e) {
+      set('読み取れませんでした：' + (e && e.message ? e.message : e), 'warn');
+    } finally {
+      ocrBusy = false;
+    }
+  }
+
   function showAdd() {
     const scanArea = h('div', { class: 'scan-area', 'data-testid': 'scan-area' });
     const el = V.add({
@@ -2050,6 +2231,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         onIsbn(isbn);
       },
       onShoot: (file) => coverFromPhoto(file, true),
+      onIsbnShoot: readIsbnFromPhoto,
       onTitleOnly: (v) => {
         const t = (v || '').trim();
         if (!t) return toast('題名を入力してください');
