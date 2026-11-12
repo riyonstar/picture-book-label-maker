@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>画面確認ページ｜絵本ラベルメーカー</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="stylesheet" href="./src/styles.css">
+  <style>
+    /* この確認ページ専用（アプリ本体のスタイルは src/styles.css を共用） */
+    body { background: #efe6d8; }
+    .page { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+    .page > header { text-align: center; margin-bottom: 8px; }
+    .page > header h1 { margin: 0 0 6px; font-size: 24px; }
+    .page > header p { margin: 4px 0; color: var(--sub); font-size: 14px; }
+    .page > header .links { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+    nav.toc { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 16px 0 24px; }
+    nav.toc a { background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--ink); text-decoration: none; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 28px; justify-items: center; }
+    figure { margin: 0; width: 100%; max-width: 390px; scroll-margin-top: 12px; }
+    figcaption { font-weight: 700; margin: 0 0 8px; text-align: center; }
+    figcaption small { display: block; font-weight: 400; color: var(--sub); font-size: 12px; }
+    .phone { background: var(--bg); border: 10px solid #2a211a; border-radius: 36px; overflow: hidden; width: 100%; max-width: 390px; height: 760px; overflow-y: auto; box-shadow: 0 10px 30px rgba(60, 40, 20, 0.25); }
+    .phone .screen { padding-top: 24px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>📚 絵本ラベルメーカー ― 画面確認ページ</h1>
+      <p>アプリ本体と同じ画面コード（<code>src/views.js</code>）で描画しています。サンプルデータを使うため、保存やカメラは動きません。</p>
+      <p>トリミング画面は実際に操作できます（ドラッグ／ピンチ／ボタン）。</p>
+      <div class="links"><a class="btn primary" href="./index.html">実アプリを開く</a></div>
+    </header>
+    <nav class="toc">
+      <a href="#s-home0">ホーム（0冊）</a><a href="#s-add">絵本登録</a><a href="#s-detail">絵本詳細</a>
+      <a href="#s-crop">トリミング</a><a href="#s-list">絵本一覧</a><a href="#s-pdf">PDFプレビュー</a>
+    </nav>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <script src="./src/dom.js"></script>
+  <script src="./src/isbn.js"></script>
+  <script src="./src/imaging.js"></script>
+  <script src="./src/cropper.js"></script>
+  <script src="./src/pdf.js"></script>
+  <script src="./src/views.js"></script>
+  <script>
+    (function (E) {
+      const { h } = E.dom;
+      const V = E.views;
+
+      // ---- サンプルの表紙（絵本っぽいイラストを canvas で生成。外部画像は使わない）----
+      function sampleCover(w, hgt, bg1, bg2, kind) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = hgt;
+        const x = c.getContext('2d');
+        const g = x.createLinearGradient(0, 0, 0, hgt);
+        g.addColorStop(0, bg1); g.addColorStop(1, bg2);
+        x.fillStyle = g; x.fillRect(0, 0, w, hgt);
+        const m = Math.min(w, hgt);
+        x.fillStyle = 'rgba(255,255,255,.9)';
+        x.beginPath();
+        if (kind === 0) { x.arc(w * 0.72, hgt * 0.25, m * 0.14, 0, 7); }
+        else if (kind === 1) { x.arc(w * 0.3, hgt * 0.28, m * 0.12, 0, 7); }
+        else { x.arc(w * 0.5, hgt * 0.22, m * 0.1, 0, 7); }
+        x.fill();
+        x.fillStyle = 'rgba(40,60,40,.85)';
+        x.beginPath(); x.moveTo(0, hgt); x.lineTo(w * 0.35, hgt * 0.6); x.lineTo(w * 0.7, hgt); x.fill();
+        x.fillStyle = 'rgba(60,90,50,.9)';
+        x.beginPath(); x.moveTo(w * 0.4, hgt); x.lineTo(w * 0.8, hgt * 0.68); x.lineTo(w, hgt); x.fill();
+        x.fillStyle = '#c8553d';
+        x.beginPath(); x.arc(w * 0.5, hgt * 0.72, m * 0.13, 0, 7); x.fill();
+        x.fillStyle = '#fff';
+        x.beginPath(); x.arc(w * 0.46, hgt * 0.7, m * 0.025, 0, 7); x.arc(w * 0.54, hgt * 0.7, m * 0.025, 0, 7); x.fill();
+        return c.toDataURL('image/jpeg', 0.9);
+      }
+      const C = [
+        sampleCover(480, 480, '#ffd27a', '#f08a3c', 0),
+        sampleCover(480, 480, '#9ec9f0', '#3c6fb0', 1),
+        sampleCover(480, 480, '#c9e8a8', '#5a9a52', 2),
+        sampleCover(480, 480, '#f4b6c8', '#c85a82', 0),
+        sampleCover(480, 480, '#d7c2f0', '#7a5ab0', 1),
+      ];
+      const books = [
+        { id: '1', title: 'はらぺこの くま', author: 'サンプル 太郎 / 作', publisher: 'ひだまり出版', isbn: '9784000000001', image: C[0] },
+        { id: '2', title: 'ねこと つき', author: 'サンプル 花子 / 作・絵', publisher: 'ほしぞら書房', isbn: '9784000000002', image: C[1] },
+        { id: '3', title: 'ぞうの おさんぽ', author: 'サンプル 次郎 / 作', publisher: 'ひだまり出版', isbn: '9784000000003', image: C[2] },
+      ];
+      const manyBooks = [];
+      for (let i = 0; i < 26; i++) manyBooks.push({ id: 'm' + i, title: 'サンプル' + i, image: C[i % C.length] });
+
+      const grid = document.getElementById('grid');
+      function frame(id, title, note, content) {
+        grid.append(h('figure', { id }, h('figcaption', {}, title, h('small', {}, note)), h('div', { class: 'phone' }, content)));
+      }
+
+      frame('s-home0', 'ホーム画面（登録 0冊）', 'タイトル／＋ 絵本を追加／登録済み 0冊／PDFを作成', V.home({ books: [] }));
+
+      frame('s-add', '絵本登録画面', 'バーコードスキャンエリア／写真から選択（実アプリではカメラ映像が入る）', V.add({}));
+
+      frame('s-detail', '絵本詳細画面', '表紙・タイトル・著者・出版社・ISBN／そのまま使用・トリミング・表紙を再取得・写真から選択・保存',
+        V.detail({
+          draft: Object.assign({}, books[0]),
+          status: { text: '表紙を取得しました。必要ならトリミングしてください。', kind: 'ok' },
+        }));
+
+      // トリミング：実際に動く（縦長の表紙から正方形に切り出す）
+      const cropHolder = h('div', {});
+      frame('s-crop', 'トリミング画面', '正方形のクロップエリア＋拡大・縮小・上下左右移動（操作できます）', cropHolder);
+      const tall = sampleCover(360, 520, '#ffe0a0', '#e98a3a', 0);
+      E.imaging.loadImage(tall).then((img) => {
+        const cropper = E.cropper.create(img);
+        cropHolder.replaceWith(V.crop({ cropper }));
+      });
+
+      frame('s-list', '絵本一覧', '登録済みの絵本をサムネイル付きで表示', V.home({ books }));
+
+      frame('s-pdf', 'PDFプレビュー', 'A4縦に 25mm × 25mm の表紙が並ぶ（寸法は実寸比で表示）',
+        V.pdf({ books: manyBooks, cutLines: true, page: 0, busy: false, result: null, onPage() {} }));
+    })(window.Ehon);
+  </script>
+</body>
+</html>

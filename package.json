@@ -1,0 +1,17 @@
+{
+  "name": "ehon-label-maker",
+  "version": "1.0.0",
+  "description": "絵本の表紙を25mm角のラベルにしてA4に印刷するPWA",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/serve.mjs --dir . --port 5173",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/serve.mjs --dir dist --port 4173 --base /ehon-label-maker/",
+    "check": "node scripts/check.mjs dist",
+    "test:unit": "node scripts/unit.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
