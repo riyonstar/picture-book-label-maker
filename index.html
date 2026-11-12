@@ -998,19 +998,25 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return null;
   }
 
-  /**
-   * タイトルから本を探す（Google Books）。バーコードがない本用。
-   * @returns {{ok:boolean, items:{title,author,publisher,isbn,thumb,covers:string[]}[]}}
-   */
-  async function searchTitle(query) {
-    const q = String(query || '').trim();
-    const out = { ok: false, items: [] };
-    if (!q) return out;
+  function reason(e) {
+    const m = e && e.message ? e.message : String(e);
+    if (/abort/i.test(m)) return 'タイムアウト';
+    if (/^HTTP/.test(m)) return m;
+    return '通信できません';
+  }
+
+  const normTitle = (t) => String(t || '').replace(/[\s\u3000]+/g, '').toLowerCase();
+
+  /** Google Books。失敗（通信エラー・HTTPエラー）は throw、0件は空配列。 */
+  async function searchGoogle(q) {
     const base = 'https://www.googleapis.com/books/v1/volumes?printType=books&maxResults=10&q=intitle:' + encodeURIComponent(q);
+    let lastErr = null;
+    let anyOk = false;
     for (const url of [base + '&langRestrict=ja', base]) {
       try {
         const j = await getJson(url);
-        out.ok = true;
+        anyOk = true;
+        const items = [];
         for (const it of j.items || []) {
           const v = it.volumeInfo || {};
           if (!v.title) continue;
@@ -1023,16 +1029,88 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
           const covers = [];
           if (it.id) for (const z of [3, 2, 1]) covers.push('https://books.google.com/books/content?id=' + it.id + '&printsec=frontcover&img=1&zoom=' + z);
           if (thumb) covers.push(thumb);
-          out.items.push({
+          items.push({
             title: v.title + (v.subtitle ? ' ' + v.subtitle : ''),
-            author: joinAuthors(v.authors),
-            publisher: v.publisher || '',
-            isbn, thumb, covers,
+            author: joinAuthors(v.authors), publisher: v.publisher || '', isbn, thumb, covers,
           });
         }
-        if (out.items.length) break;
-      } catch (e) { /* 次の条件で再試行 */ }
+        if (items.length) return items;
+      } catch (e) { lastErr = e; }
     }
+    if (!anyOk && lastErr) throw lastErr;
+    return [];
+  }
+
+  /** 国立国会図書館サーチ（OpenSearch / RSS）。日本の本に強い。 */
+  async function searchNdl(q) {
+    const r = await fetchTimeout('https://ndlsearch.ndl.go.jp/api/opensearch?cnt=10&mediatype=1&title=' + encodeURIComponent(q), 9000);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const doc = new DOMParser().parseFromString(await r.text(), 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length) throw new Error('HTTP 応答を解析できません');
+    const items = [];
+    for (const it of Array.from(doc.getElementsByTagName('item'))) {
+      const f = { title: '', creators: [], publisher: '', isbn: '' };
+      for (const ch of Array.from(it.children)) {
+        const n = ch.localName;
+        const t = (ch.textContent || '').trim();
+        if (!t) continue;
+        if (n === 'title' && !f.title) f.title = t;
+        else if (n === 'creator' || n === 'author') f.creators.push(t);
+        else if (n === 'publisher' && !f.publisher) f.publisher = t;
+        else if (n === 'identifier' && !f.isbn) f.isbn = E.isbn.normalize(t) || '';
+      }
+      if (!f.title) continue;
+      items.push({
+        title: f.title,
+        author: f.creators.filter((c, i) => f.creators.indexOf(c) === i).join('、'),
+        publisher: f.publisher, isbn: f.isbn,
+        thumb: f.isbn ? 'https://ndlsearch.ndl.go.jp/thumbnail/' + f.isbn + '.jpg' : '',
+        covers: [],
+      });
+    }
+    return items;
+  }
+
+  /** Open Library（予備）。 */
+  async function searchOpenLibrary(q) {
+    const j = await getJson('https://openlibrary.org/search.json?limit=10&fields=title,author_name,publisher,isbn,cover_i&title=' + encodeURIComponent(q));
+    return (j.docs || []).filter((d) => d.title).map((d) => {
+      let isbn = '';
+      for (const x of d.isbn || []) { const n = E.isbn.normalize(x); if (n) { isbn = n; break; } }
+      const cover = d.cover_i ? 'https://covers.openlibrary.org/b/id/' + d.cover_i + '-M.jpg' : '';
+      return {
+        title: d.title, author: joinAuthors(d.author_name), publisher: (d.publisher || [])[0] || '',
+        isbn, thumb: cover, covers: cover ? [cover.replace('-M.', '-L.')] : [],
+      };
+    });
+  }
+
+  /**
+   * タイトルから本を探す。Google Books と 国立国会図書館サーチを同時に引き、
+   * どちらも空・失敗のときだけ Open Library を試す。
+   * @returns {{ok:boolean, items:{title,author,publisher,isbn,thumb,covers:string[]}[], errors:string[]}}
+   */
+  async function searchTitle(query) {
+    const q = String(query || '').trim();
+    const out = { ok: false, items: [], errors: [] };
+    if (!q) return out;
+    const add = (list) => {
+      for (const it of list) {
+        const dup = out.items.some((x) => (it.isbn && x.isbn === it.isbn) || normTitle(x.title) === normTitle(it.title));
+        if (!dup) out.items.push(it);
+      }
+    };
+    const sources = [['Google Books', searchGoogle], ['国立国会図書館', searchNdl]];
+    const res = await Promise.allSettled(sources.map((s) => s[1](q)));
+    res.forEach((r, i) => {
+      if (r.status === 'fulfilled') { out.ok = true; add(r.value); }
+      else out.errors.push(sources[i][0] + '：' + reason(r.reason));
+    });
+    if (!out.items.length) {
+      try { add(await searchOpenLibrary(q)); out.ok = true; }
+      catch (e) { out.errors.push('Open Library：' + reason(e)); }
+    }
+    out.items = out.items.slice(0, 12);
     return out;
   }
 
@@ -1449,7 +1527,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     if (!state.items.length) {
       el.replaceChildren(h('p', { class: 'status warn' },
         state.ok ? '見つかりませんでした。別の言葉で探すか、「表紙を撮影」「題名だけで登録」を使ってください。'
-                 : '検索できませんでした。通信状況を確認するか、「表紙を撮影」「題名だけで登録」を使ってください。'));
+                 : '検索できませんでした。通信状況を確認するか、「表紙を撮影」「題名だけで登録」を使ってください。'),
+        state.errors && state.errors.length ? h('p', { class: 'note', 'data-testid': 'search-errors' }, '詳細：' + state.errors.join(' ／ ')) : null);
       return;
     }
     el.replaceChildren(
