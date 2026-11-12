@@ -133,6 +133,11 @@ html, body {
 .results .status { margin: 0; }
 .results .thumb { background: #f3ece3; }
 
+a { color: var(--primary-d); }
+.steps { margin: 0; padding-left: 1.3em; font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+.settings .status { margin: 0; word-break: break-all; }
+.settings .status.err { background: #fbe3e3; color: var(--danger); }
+
 input[type="text"] {
   font: inherit; font-size: 16px; /* 16px 未満だと iOS が自動ズームする */
   padding: 10px 12px; border: 2px solid var(--line); border-radius: 12px; background: #fff; color: var(--ink); width: 100%;
@@ -916,6 +921,20 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       }
     } catch (e) { /* 次へ */ }
 
+    const rk = rakutenCreds();
+    if (rk) {
+      try {
+        const it = rakutenItems(await rakutenCall({ isbn, hits: '1' }, rk))[0];
+        info.networkOk = true;
+        if (it) {
+          fill('title', it.title);
+          fill('author', it.author);
+          fill('publisher', it.publisher);
+          info.covers.push(...it.covers);
+        }
+      } catch (e) { /* 次へ */ }
+    }
+
     try {
       const j = await getJson('https://www.googleapis.com/books/v1/volumes?q=isbn:' + isbn + '&maxResults=1');
       info.networkOk = true;
@@ -996,6 +1015,94 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       if (img) return { img, url: u };
     }
     return null;
+  }
+
+  // ---------------------------------------------------------------- 楽天ブックス（任意・要キー）
+  // 楽天ウェブサービスの applicationId（UUID）と accessKey（pk_…）をユーザー自身が設定したときだけ使う。
+  // キーはこの端末の localStorage にだけ保存する（GitHub には置かない）。
+  const RK_ENDPOINT = 'https://openapi.rakuten.co.jp/services/api/BooksBook/Search/20170404';
+  const RK_APP = 'ehon.rk.app';
+  const RK_KEY = 'ehon.rk.key';
+  const lsGet = (k) => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+  const lsSet = (k, v) => { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) { /* ignore */ } };
+
+  function rakutenCreds() {
+    const appId = lsGet(RK_APP).trim();
+    const accessKey = lsGet(RK_KEY).trim();
+    return appId && accessKey ? { appId, accessKey } : null;
+  }
+  function setRakutenCreds(appId, accessKey) {
+    lsSet(RK_APP, (appId || '').trim());
+    lsSet(RK_KEY, (accessKey || '').trim());
+  }
+
+  /** CORS で fetch が通らない場合の予備（楽天は callback による JSONP に対応）。 */
+  function jsonp(url, ms = 9000) {
+    return new Promise((resolve, reject) => {
+      const name = '__rk' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const el = document.createElement('script');
+      let timer = null;
+      const done = (fn, v) => { clearTimeout(timer); try { delete window[name]; } catch (e) { window[name] = undefined; } el.remove(); fn(v); };
+      window[name] = (d) => done(resolve, d);
+      el.onerror = () => done(reject, new Error('通信できません（JSONP）'));
+      timer = setTimeout(() => done(reject, new Error('タイムアウト')), ms);
+      el.src = url + '&callback=' + name;
+      document.head.appendChild(el);
+    });
+  }
+
+  async function rakutenCall(params, creds) {
+    const qs = new URLSearchParams(Object.assign({ applicationId: creds.appId, accessKey: creds.accessKey, format: 'json', formatVersion: '2' }, params));
+    const url = RK_ENDPOINT + '?' + qs.toString();
+    let j;
+    try {
+      const r = await fetchTimeout(url, 9000);
+      let body = null;
+      try { body = await r.json(); } catch (e) { /* JSON でない */ }
+      if (!r.ok) throw new Error('HTTP ' + r.status + (body && body.error_description ? '（' + body.error_description + '）' : ''));
+      j = body;
+    } catch (e) {
+      if (e && e.name !== 'TypeError') throw e; // CORS・通信エラー（TypeError）のときだけ JSONP を試す
+      j = await jsonp(url);
+    }
+    if (j && j.error) throw new Error('HTTP 400（' + (j.error_description || j.error) + '）');
+    return j || {};
+  }
+
+  function rakutenItems(j) {
+    const list = j.Items || j.items || [];
+    return list.map((x) => x.Item || x.item || x).filter((x) => x && x.title).map((x) => {
+      const large = x.largeImageUrl || x.mediumImageUrl || '';
+      const covers = [];
+      if (large) {
+        if (/_ex=\d+x\d+/.test(large)) covers.push(large.replace(/_ex=\d+x\d+/, '_ex=600x600'));
+        covers.push(large);
+      }
+      return {
+        title: x.title + (x.subTitle ? ' ' + x.subTitle : ''),
+        author: x.author || '', publisher: x.publisherName || '',
+        isbn: E.isbn.normalize(x.isbn || '') || '', thumb: x.mediumImageUrl || large, covers,
+      };
+    });
+  }
+
+  async function searchRakutenWith(creds, q) {
+    const el = { hits: '20', elements: 'title,subTitle,author,publisherName,isbn,largeImageUrl,mediumImageUrl' };
+    let items = rakutenItems(await rakutenCall(Object.assign({ title: q }, el), creds));
+    if (!items.length) items = rakutenItems(await rakutenCall(Object.assign({ author: q }, el), creds));
+    return items;
+  }
+
+  async function searchRakuten(q) {
+    const creds = rakutenCreds();
+    if (!creds) throw new Error('未設定');
+    return searchRakutenWith(creds, q);
+  }
+
+  /** 設定画面の接続テスト。成功すると件数、失敗すると throw。 */
+  async function testRakuten(appId, accessKey) {
+    const items = await searchRakutenWith({ appId: (appId || '').trim(), accessKey: (accessKey || '').trim() }, 'ぐりとぐら');
+    return items.length;
   }
 
   function reason(e) {
@@ -1101,6 +1208,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       }
     };
     const sources = [['Google Books', searchGoogle], ['国立国会図書館', searchNdl]];
+    if (rakutenCreds()) sources.unshift(['楽天ブックス', searchRakuten]);
     const res = await Promise.allSettled(sources.map((s) => s[1](q)));
     res.forEach((r, i) => {
       if (r.status === 'fulfilled') { out.ok = true; add(r.value); }
@@ -1114,7 +1222,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return out;
   }
 
-  E.cover = { lookupInfo, fetchCover, searchTitle };
+  E.cover = { lookupInfo, fetchCover, searchTitle, rakutenCreds, setRakutenCreds, testRakuten };
 })((window.Ehon = window.Ehon || {}));
 
 /* ==== cropper.js ==== */
@@ -1467,7 +1575,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
                   btn('削除', () => (c.onDelete || noop)(b), 'small danger-text', { 'aria-label': (b.title || '絵本') + 'を削除' })
                 )
               ))
-      )
+      ),
+      h('p', { class: 'note', style: 'text-align:center' }, h('a', { href: '#/settings', 'data-testid': 'settings-link' }, '設定（楽天ブックス検索）'))
     );
   }
 
@@ -1509,6 +1618,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
           btn('題名だけで登録', () => (c.onTitleOnly || noop)(titleInput.value), '', { 'data-testid': 'title-only' })
         ),
         h('p', { class: 'note' }, '「探す」は書名から表紙つきの候補を表示します。「題名だけで登録」は題名を大きく入れた文字のラベルを作ります。'),
+        h('p', { class: 'note' }, 'ヒットしにくいときは ', h('a', { href: '#/settings' }, '楽天ブックス検索の設定'), ' をすると見つかりやすくなります。'),
         results
       ),
       h('details', { class: 'manual' },
@@ -1648,7 +1758,33 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     );
   }
 
-  E.views = { home, add, detail, crop, pdf, scanPlaceholder, searchResults, fitSheet };
+  // ------------------------------------------------------------ 設定（楽天ブックス）
+  function settings(c) {
+    let app, key, out;
+    const val = (i) => i.value.trim();
+    return h('main', { class: 'screen settings', 'data-screen': 'settings' },
+      topbar('楽天ブックス検索の設定', c.onBack),
+      h('p', { class: 'note' }, '書名検索で楽天ブックスのデータも使えます（日本の絵本が見つかりやすくなります）。無料のIDとキーが必要です。入力した内容はこの端末の中にだけ保存されます。'),
+      h('ol', { class: 'steps' },
+        h('li', {}, h('a', { href: 'https://webservice.rakuten.co.jp/', target: '_blank', rel: 'noopener' }, '楽天ウェブサービス'), ' で楽天会員ログインし、アプリを登録します'),
+        h('li', {}, '発行された「アプリケーションID」（英数字とハイフンのUUID）と「アクセスキー」（pk_ で始まる）を、下に貼り付けます'),
+        h('li', {}, '登録画面に「許可するウェブサイト」の欄があれば、このアプリを開いているURLのドメイン（例: https://ユーザー名.github.io）を入れます。IPアドレスの制限は設定しないでください（スマホは接続元が変わるため）')
+      ),
+      h('label', { class: 'field' }, h('span', {}, 'アプリケーションID'),
+        (app = h('input', { type: 'text', value: c.appId || '', placeholder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', 'data-testid': 'rk-app' }))),
+      h('label', { class: 'field' }, h('span', {}, 'アクセスキー'),
+        (key = h('input', { type: 'text', value: c.accessKey || '', placeholder: 'pk_…', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', 'data-testid': 'rk-key' }))),
+      h('div', { class: 'btn-grid' },
+        btn('接続テスト', () => (c.onTest || noop)(val(app), val(key), out), '', { 'data-testid': 'rk-test' }),
+        btn('保存', () => (c.onSave || noop)(val(app), val(key)), 'primary', { 'data-testid': 'rk-save' })
+      ),
+      (out = h('p', { class: 'status', 'data-testid': 'rk-out', 'aria-live': 'polite' }, c.configured ? '設定済みです。' : '未設定です。')),
+      btn('設定を削除', () => (c.onClear || noop)(), 'link'),
+      h('p', { class: 'note' }, 'キーは公開されているWebページから使う形になるため、他人に見せないでください。漏れた場合は楽天ウェブサービスで再発行できます。')
+    );
+  }
+
+  E.views = { home, settings, add, detail, crop, pdf, scanPlaceholder, searchResults, fitSheet };
 })((window.Ehon = window.Ehon || {}));
 
 (function (E) {
@@ -1791,11 +1927,41 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     if (cleanup) { try { cleanup(); } catch (e) { /* ignore */ } cleanup = null; }
     const path = (location.hash || '#/').slice(1) || '/';
     if (path === '/add') return showAdd();
+    if (path === '/settings') return showSettings();
     if (path === '/detail') return draft ? showDetail() : go('#/');
     if (path === '/crop') return showCrop(seq);
     if (path === '/pdf') return showPdf(seq);
     if (path === '/screens') { const c = h('div', {}); mount(c); return E.gallery(c); }
     return showHome(seq);
+  }
+
+  // ---------------------------------------------------------------- 設定（楽天ブックス）
+  function showSettings() {
+    const c = E.cover.rakutenCreds() || { appId: '', accessKey: '' };
+    const setOut = (el, text, kind) => { el.textContent = text; el.className = 'status ' + (kind || ''); };
+    mount(V.settings({
+      appId: c.appId,
+      accessKey: c.accessKey,
+      configured: !!E.cover.rakutenCreds(),
+      onBack: () => go('#/'),
+      onSave: (a, k) => {
+        if ((a && !k) || (!a && k)) return toast('アプリケーションIDとアクセスキーの両方を入力してください');
+        E.cover.setRakutenCreds(a, k);
+        toast(a ? '保存しました' : '設定を削除しました');
+        showSettings();
+      },
+      onClear: () => { E.cover.setRakutenCreds('', ''); toast('設定を削除しました'); showSettings(); },
+      onTest: async (a, k, out) => {
+        if (!a || !k) return setOut(out, 'アプリケーションIDとアクセスキーを入力してください', 'warn');
+        setOut(out, '接続しています…', 'info');
+        try {
+          const n = await E.cover.testRakuten(a, k);
+          setOut(out, '接続できました（「ぐりとぐら」で ' + n + ' 件）。「保存」を押すと使われます。', 'ok');
+        } catch (e) {
+          setOut(out, '接続できませんでした：' + (e && e.message ? e.message : e), 'err');
+        }
+      },
+    }));
   }
 
   // ---------------------------------------------------------------- ホーム
