@@ -136,6 +136,10 @@ html, body {
 
 a { color: var(--primary-d); }
 .steps { margin: 0; padding-left: 1.3em; font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+.settings-block { display: flex; flex-direction: column; gap: 8px; }
+.settings h2 { margin: 0; font-size: 16px; }
+.settings-h2 { margin-top: 6px !important; }
+.settings .check { margin: 0; }
 .settings .status { margin: 0; word-break: break-all; }
 .settings .status.err { background: #fbe3e3; color: var(--danger); }
 
@@ -339,28 +343,6 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return core + (c === 10 ? 'X' : String(c));
   }
 
-  /**
-   * Amazon の商品ページURLから ISBN を取り出す。書籍の ASIN は ISBN-10 と同じ値。
-   * @returns {{isbn:string|null, asin:string, title:string}|null} URL でなければ null。
-   *   isbn が null のときは ASIN が ISBN でない（Kindle 版など）。title はURLの題名部分（仮の題名）。
-   */
-  function fromAmazonUrl(input) {
-    const text = String(input || '').trim();
-    if (!/amazon\.(co\.jp|com)\//i.test(text)) return null;
-    const m = /\/(?:dp|gp\/product|gp\/aw\/d|ASIN)\/([0-9A-Z]{10})(?=[/?#]|$)/i.exec(text);
-    if (!m) return { isbn: null, asin: '', title: '' };
-    const asin = m[1].toUpperCase();
-    let isbn = null;
-    if (isbn10Valid(asin)) isbn = isbn10to13(asin);
-    // /ののって-けんちゃん-…/dp/ の「dp より前」の題名スラッグを仮の題名にする
-    let title = '';
-    const slug = /amazon\.[a-z.]+\/([^/?#]+)\/(?:dp|gp)\//i.exec(text);
-    if (slug) {
-      try { title = decodeURIComponent(slug[1]).replace(/-/g, ' ').trim(); } catch (e) { title = slug[1].replace(/-/g, ' '); }
-    }
-    return { isbn, asin, title };
-  }
-
   const FIX = { O: '0', o: '0', I: '1', l: '1', '|': '1', B: '8', S: '5', Z: '2' };
 
   function window13(d) {
@@ -394,7 +376,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return null;
   }
 
-  E.isbn = { digits, isbn13Valid, isbn10Valid, isbn10to13, isbn13to10, normalize, extract, fromAmazonUrl };
+  E.isbn = { digits, isbn13Valid, isbn10Valid, isbn10to13, isbn13to10, normalize, extract };
 })((window.Ehon = window.Ehon || {}));
 
 /* ==== store.js ==== */
@@ -1290,10 +1272,93 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return items.length;
   }
 
+  // ---------------------------------------------------------------- Amazon（非公式・中継サービス経由）
+  // Amazon には個人が使える公開の検索APIが無く、ブラウザからは直接読めない（CORS）。
+  // そのため外部の中継サービス経由で Amazon.co.jp の検索結果ページを取得し、書影・題名・ISBN を読み取る。
+  // 中継サービスや Amazon 側の都合で使えなくなることがある。設定でオフにできる。
+  const AMZ_KEY = 'ehon.amazon';
+  const amazonEnabled = () => lsGet(AMZ_KEY) !== '0';
+  const setAmazonEnabled = (on) => lsSet(AMZ_KEY, on ? '' : '0');
+
+  /** 一覧用の小さい画像URLを、ラベル用の大きい画像URLにする（…._AC_UY218_.jpg → …._SL500_.jpg）。 */
+  const amzLarge = (src) => src.replace(/\._[A-Za-z0-9_,%-]+_\.(jpg|jpeg|png)/i, '._SL500_.$1');
+
+  function amzItem(asin, title, src, author) {
+    const isbn = E.isbn.isbn10Valid(asin) ? E.isbn.isbn10to13(asin) : '';
+    return { title, author: author || '', publisher: '', isbn, thumb: src, covers: [amzLarge(src), src], source: 'Amazon' };
+  }
+
+  /** 検索結果ページ（HTML）から候補を読み取る。 */
+  function parseAmazonHtml(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const items = [];
+    const seen = new Set();
+    doc.querySelectorAll('[data-component-type="s-search-result"][data-asin]').forEach((el) => {
+      const asin = (el.getAttribute('data-asin') || '').toUpperCase();
+      if (!/^[0-9A-Z]{10}$/.test(asin) || seen.has(asin)) return;
+      const h2 = el.querySelector('h2');
+      const im = el.querySelector('img.s-image');
+      const title = h2 ? h2.textContent.replace(/\s+/g, ' ').trim() : '';
+      const src = im ? im.getAttribute('src') || '' : '';
+      if (!title || !/^https?:/.test(src)) return;
+      seen.add(asin);
+      const sec = el.querySelector('.a-row.a-size-base.a-color-secondary');
+      const author = sec
+        ? sec.textContent.replace(/\s+/g, ' ').split('|')[0].replace(/\d{4}\/\d{1,2}\/\d{1,2}.*$/, '').replace(/^(著者|作|文|絵|by)[:：]?\s*/i, '').trim()
+        : '';
+      items.push(amzItem(asin, title, src, author));
+    });
+    return items;
+  }
+
+  /** 中継サービスがページを Markdown に変換して返した場合の読み取り。 */
+  function parseAmazonMarkdown(md) {
+    const byAsin = new Map();
+    const link = /\[((?:[^\[\]]|\[[^\]]*\])*)\]\((https?:\/\/[^)\s]*?\/dp\/([0-9A-Z]{10})[^)\s]*)\)/g;
+    let m;
+    while ((m = link.exec(md))) {
+      const text = m[1];
+      const asin = m[3];
+      const rec = byAsin.get(asin) || { title: '', src: '' };
+      const img = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/.exec(text);
+      if (img) { if (!rec.src) rec.src = img[1]; }
+      else if (!rec.title && text.trim().length > 1 && !/^(Image|画像)/i.test(text.trim())) rec.title = text.replace(/\s+/g, ' ').trim();
+      byAsin.set(asin, rec);
+    }
+    const items = [];
+    byAsin.forEach((rec, asin) => { if (rec.title && /^https?:/.test(rec.src)) items.push(amzItem(asin, rec.title, rec.src, '')); });
+    return items;
+  }
+
+  async function searchAmazon(q) {
+    const target = 'https://www.amazon.co.jp/s?i=stripbooks&k=' + encodeURIComponent(q);
+    const routes = [
+      ['api.allorigins.win', (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u)],
+      ['r.jina.ai', (u) => 'https://r.jina.ai/' + u],
+    ];
+    let lastErr = null;
+    let robot = false;
+    for (const [, make] of routes) {
+      try {
+        const r = await fetchTimeout(make(target), 9000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const text = await r.text();
+        const items = /<html|<body|data-component-type/i.test(text) ? parseAmazonHtml(text) : parseAmazonMarkdown(text);
+        if (items.length) return items.slice(0, 10);
+        if (/captcha|automated access|ロボット|api-services-support@amazon/i.test(text)) robot = true;
+        lastErr = null;
+      } catch (e) { lastErr = e; }
+    }
+    if (robot) throw new Error('Amazonがロボット判定で応答しました');
+    if (lastErr) throw lastErr;
+    return [];
+  }
+
   function reason(e) {
     const m = e && e.message ? e.message : String(e);
     if (/abort/i.test(m)) return 'タイムアウト';
     if (/^HTTP/.test(m)) return m;
+    if (/[ぁ-んァ-ヶ一-龠]/.test(m)) return m; // 利用者向けに書いた日本語の理由はそのまま表示
     return '通信できません';
   }
 
@@ -1335,7 +1400,13 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
 
   /** 国立国会図書館サーチ（OpenSearch / RSS）。日本の本に強い。 */
   async function searchNdl(q) {
-    const r = await fetchTimeout('https://ndlsearch.ndl.go.jp/api/opensearch?cnt=10&mediatype=1&title=' + encodeURIComponent(q), 9000);
+    // 題名は「のって のって」のように空白入りで登録されていることがあるので、題名検索で外れたら全文検索でも探す
+    const first = await searchNdlBy('title', q);
+    return first.length ? first : searchNdlBy('any', q);
+  }
+
+  async function searchNdlBy(param, q) {
+    const r = await fetchTimeout('https://ndlsearch.ndl.go.jp/api/opensearch?cnt=10&mediatype=1&' + param + '=' + encodeURIComponent(q), 9000);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const doc = new DOMParser().parseFromString(await r.text(), 'application/xml');
     if (doc.getElementsByTagName('parsererror').length) throw new Error('HTTP 応答を解析できません');
@@ -1378,11 +1449,11 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
   }
 
   /**
-   * タイトルから本を探す。Google Books と 国立国会図書館サーチを同時に引き、
-   * どちらも空・失敗のときだけ Open Library を試す。
+   * タイトルから本を探す。Google Books・国立国会図書館サーチ（・楽天ブックス・Amazon）を同時に引く。
+   * どれかが答えるたびに onUpdate(out) で途中結果を渡す。全部が空・失敗のときだけ Open Library を試す。
    * @returns {{ok:boolean, items:{title,author,publisher,isbn,thumb,covers:string[]}[], errors:string[]}}
    */
-  async function searchTitle(query) {
+  async function searchTitle(query, onUpdate) {
     const q = String(query || '').trim();
     const out = { ok: false, items: [], errors: [] };
     if (!q) return out;
@@ -1392,28 +1463,29 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         if (!dup) out.items.push(it);
       }
     };
-    const sources = [['Google Books', searchGoogle], ['国立国会図書館', searchNdl]];
-    if (rakutenCreds()) sources.unshift(['楽天ブックス', searchRakuten]);
-    const res = await Promise.allSettled(sources.map((s) => s[1](q)));
-    res.forEach((r, i) => {
-      if (r.status === 'fulfilled') { out.ok = true; add(r.value); }
-      else out.errors.push(sources[i][0] + '：' + reason(r.reason));
-    });
+    const base = [['Google Books', searchGoogle], ['国立国会図書館', searchNdl]];
+    if (rakutenCreds()) base.unshift(['楽天ブックス', searchRakuten]);
+    const sources = amazonEnabled() ? base.concat([['Amazon', searchAmazon]]) : base;
+    await Promise.all(sources.map(async ([name, fn]) => {
+      try { add(await fn(q)); out.ok = true; }
+      catch (e) { out.errors.push(name + '：' + reason(e)); }
+      if (onUpdate) onUpdate(out);
+    }));
     // 「のって のって」と「のってのって」のように空白の有無で外れることがあるため、空白を除いても探す
     const compact = q.replace(/[\s\u3000]+/g, '');
     if (!out.items.length && compact !== q && compact) {
-      const res2 = await Promise.allSettled(sources.map((s) => s[1](compact)));
+      const res2 = await Promise.allSettled(base.map((s2) => s2[1](compact)));
       res2.forEach((r) => { if (r.status === 'fulfilled') { out.ok = true; add(r.value); } });
     }
     if (!out.items.length) {
       try { add(await searchOpenLibrary(q)); out.ok = true; }
       catch (e) { out.errors.push('Open Library：' + reason(e)); }
     }
-    out.items = out.items.slice(0, 12);
+    out.items = out.items.slice(0, 15);
     return out;
   }
 
-  E.cover = { lookupInfo, fetchCover, searchTitle, rakutenCreds, setRakutenCreds, testRakuten };
+  E.cover = { lookupInfo, fetchCover, searchTitle, rakutenCreds, setRakutenCreds, testRakuten, amazonEnabled, setAmazonEnabled, parseAmazonHtml, parseAmazonMarkdown };
 })((window.Ehon = window.Ehon || {}));
 
 /* ==== cropper.js ==== */
@@ -1767,7 +1839,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
                 )
               ))
       ),
-      h('p', { class: 'note', style: 'text-align:center' }, h('a', { href: '#/settings', 'data-testid': 'settings-link' }, '設定（楽天ブックス検索）'))
+      h('p', { class: 'note', style: 'text-align:center' }, h('a', { href: '#/settings', 'data-testid': 'settings-link' }, '検索の設定（楽天・Amazon）'))
     );
   }
 
@@ -1796,14 +1868,13 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         h('p', { class: 'note' }, 'バーコードの写真を読み取ります。読み取れない場合は、その写真を表紙として登録できます。')
       ),
       h('section', { class: 'manual', 'data-testid': 'manual' },
-        h('h2', {}, 'ISBNを手入力（AmazonのURLも可）'),
+        h('h2', {}, 'ISBNを手入力'),
         h('div', { class: 'manual-row' },
-          (manual = h('input', { type: 'text', inputmode: 'numeric', placeholder: '例: 9784000000000 / AmazonのURL', 'aria-label': 'ISBN', 'data-testid': 'isbn-input', enterkeyhint: 'search',
+          (manual = h('input', { type: 'text', inputmode: 'numeric', placeholder: '例: 9784000000000', 'aria-label': 'ISBN', 'data-testid': 'isbn-input', enterkeyhint: 'search',
             onKeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); (c.onManual || noop)(manual.value); } } })),
           btn('検索', () => (c.onManual || noop)(manual.value), 'small primary')
         ),
         photoButton('カメラで撮影してISBNを読み取る', (f) => (c.onIsbnShoot || noop)(f, ocrOut), '', 'isbn-shoot-input'),
-        h('p', { class: 'note' }, 'Amazonで見つけた本は、商品ページのURL（…/dp/XXXXXXXXXX）を貼り付けて「検索」を押すと、ISBNを読み取って取得します。'),
         h('p', { class: 'note' }, '絵本の背表紙や裏表紙に印刷された「ISBN978-…」の数字を撮影すると、自動で読み取ります（バーコードも読み取れます）。数字を大きく、まっすぐ写してください。'),
         ocrOut
       ),
@@ -1822,7 +1893,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
           btn('題名だけで登録', () => (c.onTitleOnly || noop)(titleInput.value), '', { 'data-testid': 'title-only' })
         ),
         h('p', { class: 'note' }, '「探す」は書名から表紙つきの候補を表示します。「題名だけで登録」は題名を大きく入れた文字のラベルを作ります。'),
-        h('p', { class: 'note' }, 'ヒットしにくいときは ', h('a', { href: '#/settings' }, '楽天ブックス検索の設定'), ' をすると見つかりやすくなります。'),
+        h('p', { class: 'note' }, 'ヒットしにくいときは ', h('a', { href: '#/settings' }, '検索の設定'), ' で楽天ブックスを追加すると見つかりやすくなります。'),
         results
       )
     );
@@ -1830,7 +1901,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
 
   /** タイトル検索の結果リスト。el の中身を置き換える。 */
   function searchResults(el, state, onPick) {
-    if (state.loading) { el.replaceChildren(h('p', { class: 'note' }, '探しています…')); return; }
+    if (state.loading && !state.items.length) { el.replaceChildren(h('p', { class: 'note' }, '探しています…')); return; }
     if (!state.items.length) {
       el.replaceChildren(h('p', { class: 'status warn' },
         state.ok ? '見つかりませんでした。別の言葉で探すか、「表紙を撮影」「題名だけで登録」を使ってください。'
@@ -1847,8 +1918,9 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
             h('span', { class: 'meta' },
               h('span', { class: 'title' }, it.title),
               h('span', { class: 'author' }, it.author || '著者不明'),
-              h('span', { class: 'isbn' }, it.publisher || ''))))
-      ))
+              h('span', { class: 'isbn' }, [it.publisher, it.source].filter(Boolean).join(' ・ ')))))
+      )),
+      state.loading ? h('p', { class: 'note', 'data-testid': 'search-pending' }, 'ほかの検索元の結果を待っています…') : null
     );
   }
 
@@ -1972,7 +2044,15 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     let app, key, out;
     const val = (i) => i.value.trim();
     return h('main', { class: 'screen settings', 'data-screen': 'settings' },
-      topbar('楽天ブックス検索の設定', c.onBack),
+      topbar('検索の設定', c.onBack),
+      h('section', { class: 'settings-block' },
+        h('h2', {}, 'Amazonも検索する'),
+        h('label', { class: 'check' },
+          h('input', { type: 'checkbox', checked: c.amazon ? true : null, 'data-testid': 'amazon-toggle', onChange: (e) => (c.onToggleAmazon || noop)(e.target.checked) }),
+          h('span', {}, '題名検索にAmazon（書影・題名）を含める')),
+        h('p', { class: 'note' }, 'Amazonには個人が使える公式の検索APIがないため、外部の中継サービス（allorigins.win / r.jina.ai）を通してAmazon.co.jpの検索結果ページを読み取ります。検索した言葉がそれらのサービスにも送られます。Amazonや中継サービスの都合で、使えない・結果が出ないことがあります。')
+      ),
+      h('h2', { class: 'settings-h2' }, '楽天ブックス（任意）'),
       h('p', { class: 'note' }, '書名検索で楽天ブックスのデータも使えます（日本の絵本が見つかりやすくなります）。無料のIDとキーが必要です。入力した内容はこの端末の中にだけ保存されます。'),
       h('ol', { class: 'steps' },
         h('li', {}, h('a', { href: 'https://webservice.rakuten.co.jp/', target: '_blank', rel: 'noopener' }, '楽天ウェブサービス'), ' で楽天会員ログインし、アプリを登録します'),
@@ -2149,6 +2229,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     const c = E.cover.rakutenCreds() || { appId: '', accessKey: '' };
     const setOut = (el, text, kind) => { el.textContent = text; el.className = 'status ' + (kind || ''); };
     mount(V.settings({
+      amazon: E.cover.amazonEnabled(),
+      onToggleAmazon: (on) => { E.cover.setAmazonEnabled(on); toast(on ? 'Amazonも検索します' : 'Amazonを検索しません'); },
       appId: c.appId,
       accessKey: c.accessKey,
       configured: !!E.cover.rakutenCreds(),
@@ -2224,11 +2306,9 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
   async function runTitleSearch(query, el) {
     const q = (query || '').trim();
     if (!q) return toast('探したい題名を入力してください');
-    if (E.isbn.fromAmazonUrl(q)) { el.replaceChildren(); return handleIsbnInput(q); } // Amazon の URL を貼った場合
+    const seq = (el._seq = (el._seq || 0) + 1); // 前の検索の遅れて届いた結果で上書きしない
     E.views.searchResults(el, { loading: true, items: [] });
-    const res = await E.cover.searchTitle(q);
-    if (!el.isConnected) return;
-    E.views.searchResults(el, res, async (item) => {
+    const pick = async (item) => {
       newDraft(item.isbn || '');
       const mine = draft;
       mine.title = item.title;
@@ -2236,7 +2316,13 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       mine.publisher = item.publisher;
       go('#/detail');
       setStatus('表紙を取得しています…', 'info');
+      // ISBN があるのに著者・出版社が空（Amazon など）なら、ほかの書誌情報で補う
+      const infoP = item.isbn && !(item.author && item.publisher) ? E.cover.lookupInfo(item.isbn) : null;
       const found = await E.cover.fetchCover(item.isbn, { covers: item.covers });
+      if (infoP) {
+        const info = await infoP;
+        if (draft === mine) for (const k of ['author', 'publisher']) if (!mine[k] && info[k]) mine[k] = info[k];
+      }
       if (draft !== mine) return;
       if (found) {
         mine.original = E.imaging.imageToDataUrl(found.img, 1200);
@@ -2245,7 +2331,12 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       } else {
         setStatus('この候補の表紙画像は取得できませんでした。「表紙を撮影」か「文字の表紙を作成」を使ってください。', 'warn');
       }
+    };
+    const res = await E.cover.searchTitle(q, (o) => {
+      if (el.isConnected && el._seq === seq) E.views.searchResults(el, { loading: true, items: o.items.slice(), ok: o.ok, errors: o.errors.slice() }, pick);
     });
+    if (!el.isConnected || el._seq !== seq) return;
+    E.views.searchResults(el, res, pick);
   }
 
   /** 写真から ISBN を読み取る：まずバーコード、読めなければ印刷された数字を文字認識(OCR)。 */
@@ -2342,21 +2433,14 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     }
   }
 
-  /** ISBN（10/13桁）または Amazon の商品ページURL から本を探す。 */
+  /** ISBN（10/13桁）から本を探す。 */
   function handleIsbnInput(v) {
-    const az = E.isbn.fromAmazonUrl(v);
-    if (az) {
-      if (az.isbn) return onIsbn(az.isbn, az.title);
-      return toast(az.asin
-        ? 'このAmazonのURLはISBNのない商品（Kindle版など）です。紙の本のページURLか、ISBNを入力してください'
-        : 'AmazonのURLから商品コードを読み取れません。「…/dp/XXXXXXXXXX」の形のURLを貼ってください（短縮URLは使えません）');
-    }
     const isbn = E.isbn.normalize(v);
-    if (!isbn) return toast('正しいISBN（10桁または13桁）か、AmazonのURLを入力してください');
+    if (!isbn) return toast('正しいISBN（10桁または13桁）を入力してください');
     onIsbn(isbn);
   }
 
-  async function onIsbn(isbn, hintTitle) {
+  async function onIsbn(isbn) {
     let exist = null;
     try { exist = (await E.store.list()).find((b) => b.isbn === isbn); } catch (e) { /* ignore */ }
     if (exist && confirm('この絵本は登録済みです（' + (exist.title || isbn) + '）。\n編集しますか？')) {
@@ -2366,30 +2450,28 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     }
     newDraft(isbn);
     go('#/detail');
-    lookup(isbn, hintTitle);
+    lookup(isbn);
   }
 
   /** 書誌情報と表紙の取得。取得中に別の絵本へ移っていたら結果は捨てる。 */
-  async function lookup(isbn, hintTitle) {
+  async function lookup(isbn) {
     const mine = draft;
     setStatus('書誌情報と表紙を取得しています…', 'info');
     const info = await E.cover.lookupInfo(isbn);
     if (draft !== mine) return;
     for (const k of ['title', 'author', 'publisher']) if (!mine[k] && info[k]) mine[k] = info[k];
-    // どの情報源にも無い本は、AmazonのURLに含まれる題名を仮入力する
-    let note = '';
-    if (!mine.title && hintTitle) { mine.title = hintTitle; note = ' 題名はAmazonのURLから仮入力しました。確認して直してください。'; }
+
     setStatus('表紙画像を探しています…', 'info');
     const found = await E.cover.fetchCover(isbn, info);
     if (draft !== mine) return;
     if (found) {
       mine.original = E.imaging.imageToDataUrl(found.img, 1200);
       mine.image = E.imaging.renderContain(found.img);
-      setStatus('表紙を取得しました。必要ならトリミングしてください。' + note, 'ok');
+      setStatus('表紙を取得しました。必要ならトリミングしてください。', 'ok');
     } else if (!info.networkOk) {
-      setStatus('ネットワークに接続できませんでした。通信状況を確認するか、「写真から選択」で表紙を登録してください。' + note, 'warn');
+      setStatus('ネットワークに接続できませんでした。通信状況を確認するか、「写真から選択」で表紙を登録してください。', 'warn');
     } else {
-      setStatus('表紙画像が見つかりませんでした。「写真から選択」で表紙を登録してください。' + note, 'warn');
+      setStatus('表紙画像が見つかりませんでした。「写真から選択」で表紙を登録してください。', 'warn');
     }
   }
 
