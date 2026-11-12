@@ -329,6 +329,16 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return null;
   }
 
+  /** 978 始まりの ISBN-13 → ISBN-10（Amazon の ASIN と同じ値）。変換できなければ null。 */
+  function isbn13to10(s) {
+    if (!/^978\d{10}$/.test(s) || !isbn13Valid(s)) return null;
+    const core = s.slice(3, 12);
+    let sum = 0;
+    for (let i = 0; i < 9; i++) sum += Number(core[i]) * (10 - i);
+    const c = (11 - (sum % 11)) % 11;
+    return core + (c === 10 ? 'X' : String(c));
+  }
+
   const FIX = { O: '0', o: '0', I: '1', l: '1', '|': '1', B: '8', S: '5', Z: '2' };
 
   function window13(d) {
@@ -362,7 +372,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return null;
   }
 
-  E.isbn = { digits, isbn13Valid, isbn10Valid, isbn10to13, normalize, extract };
+  E.isbn = { digits, isbn13Valid, isbn10Valid, isbn10to13, isbn13to10, normalize, extract };
 })((window.Ehon = window.Ehon || {}));
 
 /* ==== store.js ==== */
@@ -1154,6 +1164,12 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
           ]
         : []),
     ];
+    // 最後の手段：Amazon の書影（ISBN-10 = ASIN）。公式APIではなく非公式のURLなので、他で見つからないときだけ使う。
+    const ten = isbn ? E.isbn.isbn13to10(isbn) : null;
+    if (ten) {
+      urls.push('https://images-na.ssl-images-amazon.com/images/P/' + ten + '.09.LZZZZZZZ.jpg');
+      urls.push('https://m.media-amazon.com/images/P/' + ten + '.09.LZZZZZZZ.jpg');
+    }
     const seen = new Set();
     for (const u of urls) {
       if (seen.has(u)) continue;
@@ -1808,6 +1824,17 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
   }
 
   // ------------------------------------------------------------ 絵本詳細
+  /** Amazon の商品ページへのリンク（ISBN-10 = ASIN。978 以外は検索結果）。ISBN が無ければ表示しない。 */
+  function amazonLink(isbn) {
+    const n = E.isbn.normalize(isbn);
+    if (!n) return null;
+    const ten = E.isbn.isbn13to10(n);
+    const url = ten ? 'https://www.amazon.co.jp/dp/' + ten : 'https://www.amazon.co.jp/s?k=' + n;
+    return h('p', { class: 'cover-caption' },
+      h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', 'data-testid': 'amazon-link' }, 'Amazonでこの本を見る'),
+      '（題名などを確認できます）');
+  }
+
   function detail(c) {
     const d = c.draft;
     const field = (label, key, attrs = {}) =>
@@ -1818,6 +1845,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       h('div', { class: 'cover-box', 'data-testid': 'cover-box' },
         d.image ? h('img', { src: d.image, alt: '表紙画像' }) : h('div', { class: 'cover-empty' }, '表紙画像なし')),
       h('p', { class: 'cover-caption' }, 'ラベルは正方形（25mm × 25mm）で印刷されます'),
+      amazonLink(d.isbn),
       c.status && c.status.text ? h('p', { class: 'status ' + (c.status.kind || ''), 'data-testid': 'status', 'aria-live': 'polite' }, c.status.text) : null,
       h('div', { class: 'form' },
         field('タイトル', 'title', { placeholder: '例: ぐりとぐら' }),
