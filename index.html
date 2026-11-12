@@ -1293,12 +1293,13 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const items = [];
     const seen = new Set();
-    doc.querySelectorAll('[data-component-type="s-search-result"][data-asin]').forEach((el) => {
+    doc.querySelectorAll('[data-component-type="s-search-result"][data-asin], .s-result-item[data-asin]').forEach((el) => {
       const asin = (el.getAttribute('data-asin') || '').toUpperCase();
       if (!/^[0-9A-Z]{10}$/.test(asin) || seen.has(asin)) return;
       const h2 = el.querySelector('h2');
-      const im = el.querySelector('img.s-image');
-      const title = h2 ? h2.textContent.replace(/\s+/g, ' ').trim() : '';
+      const im = el.querySelector('img.s-image') || el.querySelector('img[src*="media-amazon"]');
+      let title = h2 ? h2.textContent.replace(/\s+/g, ' ').trim() : '';
+      if (!title && im) title = (im.getAttribute('alt') || '').replace(/\s+/g, ' ').trim();
       const src = im ? im.getAttribute('src') || '' : '';
       if (!title || !/^https?:/.test(src)) return;
       seen.add(asin);
@@ -1321,37 +1322,52 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       const asin = m[3];
       const rec = byAsin.get(asin) || { title: '', src: '' };
       const img = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/.exec(text);
-      if (img) { if (!rec.src) rec.src = img[1]; }
+      if (img) {
+        if (!rec.src) rec.src = img[1];
+        const alt = /!\[([^\]]*)\]/.exec(text);
+        const t = alt ? alt[1].replace(/^(Image|画像)\s*\d*\s*[:：]?\s*/i, '').replace(/\s+/g, ' ').trim() : '';
+        if (!rec.alt && t.length > 1) rec.alt = t;
+      }
       else if (!rec.title && text.trim().length > 1 && !/^(Image|画像)/i.test(text.trim())) rec.title = text.replace(/\s+/g, ' ').trim();
       byAsin.set(asin, rec);
     }
     const items = [];
-    byAsin.forEach((rec, asin) => { if (rec.title && /^https?:/.test(rec.src)) items.push(amzItem(asin, rec.title, rec.src, '')); });
+    byAsin.forEach((rec, asin) => { const t = rec.title || rec.alt; if (t && /^https?:/.test(rec.src)) items.push(amzItem(asin, t, rec.src, '')); });
     return items;
   }
 
-  async function searchAmazon(q) {
+  async function searchAmazon(q, notes) {
     const target = 'https://www.amazon.co.jp/s?i=stripbooks&k=' + encodeURIComponent(q);
     const routes = [
-      ['api.allorigins.win', (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u)],
-      ['r.jina.ai', (u) => 'https://r.jina.ai/' + u],
+      ['allorigins', (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u)],
+      ['jina', (u) => 'https://r.jina.ai/' + u],
+      ['codetabs', (u) => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(u)],
     ];
-    let lastErr = null;
+    const diag = [];
     let robot = false;
-    for (const [, make] of routes) {
+    let okCount = 0;
+    const one = async ([name, make]) => {
       try {
         const r = await fetchTimeout(make(target), 9000);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const text = await r.text();
+        okCount++;
         const items = /<html|<body|data-component-type/i.test(text) ? parseAmazonHtml(text) : parseAmazonMarkdown(text);
-        if (items.length) return items.slice(0, 10);
+        if (items.length) return items;
         if (/captcha|automated access|ロボット|api-services-support@amazon/i.test(text)) robot = true;
-        lastErr = null;
-      } catch (e) { lastErr = e; }
+        diag.push(name + ':応答' + text.length + '字/商品なし');
+      } catch (e) { diag.push(name + ':' + reason(e)); }
+      throw new Error('empty');
+    };
+    try {
+      const items = await Promise.any(routes.map(one));
+      return items.slice(0, 10);
+    } catch (e) {
+      if (robot) throw new Error('Amazonがロボット判定で応答しました');
+      if (!okCount) throw new Error('中継サービスに接続できません（' + diag.join(' / ') + '）');
+      if (notes && !notes.some((n) => n.startsWith('Amazon'))) notes.push('Amazon：0件（' + diag.join(' / ') + '）');
+      return [];
     }
-    if (robot) throw new Error('Amazonがロボット判定で応答しました');
-    if (lastErr) throw lastErr;
-    return [];
   }
 
   function reason(e) {
@@ -1362,10 +1378,16 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     return '通信できません';
   }
 
+  /** 比較用に正規化：全角半角・大小・かな種・空白と記号をそろえる。 */
+  const normLoose = (t) => String(t || '').normalize('NFKC').toLowerCase()
+    .replace(/[\u30a1-\u30f6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+    .replace(/[\s\u3000「」『』（）()\[\]【】・、。,.!！?？~〜:：'"“”\-]/g, '');
   const normTitle = (t) => String(t || '').replace(/[\s\u3000]+/g, '').toLowerCase();
 
   /** Google Books。失敗（通信エラー・HTTPエラー）は throw、0件は空配列。 */
+  let googleBlockedUntil = 0;
   async function searchGoogle(q) {
+    if (Date.now() < googleBlockedUntil) throw new Error('HTTP 429（Googleの制限中。しばらく待つと使えます）');
     const base = 'https://www.googleapis.com/books/v1/volumes?printType=books&maxResults=10&q=intitle:' + encodeURIComponent(q);
     let lastErr = null;
     let anyOk = false;
@@ -1392,7 +1414,10 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
           });
         }
         if (items.length) return items;
-      } catch (e) { lastErr = e; }
+      } catch (e) {
+        lastErr = e;
+        if (/429/.test(String(e && e.message))) { googleBlockedUntil = Date.now() + 60000; break; }
+      }
     }
     if (!anyOk && lastErr) throw lastErr;
     return [];
@@ -1454,8 +1479,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
    * @returns {{ok:boolean, items:{title,author,publisher,isbn,thumb,covers:string[]}[], errors:string[]}}
    */
   async function searchTitle(query, onUpdate) {
-    const q = String(query || '').trim();
-    const out = { ok: false, items: [], errors: [] };
+    const q = String(query || '').trim().replace(/^[「『]+|[」』]+$/g, '').trim();
+    const out = { ok: false, items: [], errors: [], notes: [] };
     if (!q) return out;
     const add = (list) => {
       for (const it of list) {
@@ -1467,8 +1492,15 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     if (rakutenCreds()) base.unshift(['楽天ブックス', searchRakuten]);
     const sources = amazonEnabled() ? base.concat([['Amazon', searchAmazon]]) : base;
     await Promise.all(sources.map(async ([name, fn]) => {
-      try { add(await fn(q)); out.ok = true; }
-      catch (e) { out.errors.push(name + '：' + reason(e)); }
+      try {
+        let list = await fn(q, out.notes);
+        // 「だるまさんが」のように、かぎ括弧で囲むと当たる検索元があるため、0件のときは囲んでも探す
+        if (!list.length && !/[「」]/.test(q)) {
+          try { list = await fn('「' + q + '」', out.notes); } catch (e2) { /* 元の結果(0件)を採用 */ }
+        }
+        add(list); out.ok = true;
+        if (!list.length && !out.notes.some((n) => n.startsWith(name))) out.notes.push(name + '：0件');
+      } catch (e) { out.errors.push(name + '：' + reason(e)); }
       if (onUpdate) onUpdate(out);
     }));
     // 「のって のって」と「のってのって」のように空白の有無で外れることがあるため、空白を除いても探す
@@ -1480,6 +1512,13 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
     if (!out.items.length) {
       try { add(await searchOpenLibrary(q)); out.ok = true; }
       catch (e) { out.errors.push('Open Library：' + reason(e)); }
+    }
+    // 絵本と無関係な結果を除く：題名・著者・出版社のどれかに、入力した言葉が含まれるものだけ残す
+    // （1件も当たらないときだけ、除かずにそのまま出す）
+    const key = normLoose(q.replace(/[「」]/g, ''));
+    if (key) {
+      const rel = out.items.filter((it) => normLoose(it.title + it.author + it.publisher).includes(key));
+      if (rel.length) out.items = rel;
     }
     out.items = out.items.slice(0, 15);
     return out;
@@ -1906,7 +1945,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       el.replaceChildren(h('p', { class: 'status warn' },
         state.ok ? '見つかりませんでした。別の言葉で探すか、「表紙を撮影」「題名だけで登録」を使ってください。'
                  : '検索できませんでした。通信状況を確認するか、「表紙を撮影」「題名だけで登録」を使ってください。'),
-        state.errors && state.errors.length ? h('p', { class: 'note', 'data-testid': 'search-errors' }, '詳細：' + state.errors.join(' ／ ')) : null);
+        (state.errors || []).length + (state.notes || []).length ? h('p', { class: 'note', 'data-testid': 'search-errors' }, '詳細：' + (state.errors || []).concat(state.notes || []).join(' ／ ')) : null);
       return;
     }
     el.replaceChildren(
@@ -2333,7 +2372,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       }
     };
     const res = await E.cover.searchTitle(q, (o) => {
-      if (el.isConnected && el._seq === seq) E.views.searchResults(el, { loading: true, items: o.items.slice(), ok: o.ok, errors: o.errors.slice() }, pick);
+      if (el.isConnected && el._seq === seq) E.views.searchResults(el, { loading: true, items: o.items.slice(), ok: o.ok, errors: o.errors.slice(), notes: o.notes.slice() }, pick);
     });
     if (!el.isConnected || el._seq !== seq) return;
     E.views.searchResults(el, res, pick);
