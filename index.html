@@ -449,7 +449,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
 (function (E) {
   'use strict';
 
-  const OUT_SIZE = 480; // 25mm 角に対して約 490dpi
+  const OUT_SIZE = 480; // 26mm 角に対して約 470dpi
 
   function loadImage(src) {
     return new Promise((resolve, reject) => {
@@ -1651,7 +1651,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
 /* ==== pdf.js ==== */
 /*
  * A4 縦 PDF の生成（外部ライブラリなし）。
- *  - 表紙画像は JPEG のまま埋め込み、1 辺をちょうど 25mm（=70.866pt）で配置する
+ *  - 表紙画像は JPEG のまま埋め込み、1 辺をちょうど 26mm（=73.701pt）で配置する
  *  - 用紙サイズは 595.276 × 841.890 pt（210 × 297mm）
  * HTMLプレビューも同じ layout() の値を使うので、見た目と PDF は一致する。
  */
@@ -1660,13 +1660,14 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
 
   const MM = 72 / 25.4; // 1mm = 2.8346pt
   const PAGE = { w: 210, h: 297 }; // mm
-  const SIZE = 25; // ラベル 1 辺 (mm)
-  const GAP = 2; // ラベル間 (mm)。切り取り線が見えるぶんの余白
-  const MARGIN = 10; // 最低余白 (mm)
+  const SIZE = 26; // ラベル 1 辺 (mm)
+  const GAP = 8; // ラベル間 (mm)。切り取り線が見えるぶんの余白
+  const COLS = 4; // 1 ページ 4 列 × 5 行 = 20 枚
+  const ROWS = 5;
 
   function layout() {
-    const cols = Math.floor((PAGE.w - MARGIN * 2 + GAP) / (SIZE + GAP));
-    const rows = Math.floor((PAGE.h - MARGIN * 2 + GAP) / (SIZE + GAP));
+    const cols = COLS;
+    const rows = ROWS;
     const gridW = cols * SIZE + (cols - 1) * GAP;
     const gridH = rows * SIZE + (rows - 1) * GAP;
     return {
@@ -1738,7 +1739,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       Array.from({ length: pageCount }, (_, p) => pageId(p) + ' 0 R').join(' ') + '] >>\n');
     end();
     begin(3);
-    str('<< /Title ' + utf16Hex('絵本ラベル 25mm') + ' /Creator (Ehon Label Maker) >>\n');
+    str('<< /Title ' + utf16Hex('絵本ラベル 26mm') + ' /Creator (Ehon Label Maker) >>\n');
     end();
 
     for (let i = 0; i < n; i++) {
@@ -1767,7 +1768,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       });
       let c = '';
       if (opts.cutLines) {
-        // 線は画像の外側に出す（線幅 0.25pt の半分だけ外へ）。画像の 25mm は変えない。
+        // 線は画像の外側に出す（線幅 0.25pt の半分だけ外へ）。画像の 26mm は変えない。
         c += 'q 0.55 G 0.25 w\n';
         for (const t of cells) {
           c += f3(t.x - 0.125) + ' ' + f3(t.y - 0.125) + ' ' + f3(sizePt + 0.25) + ' ' + f3(sizePt + 0.25) + ' re S\n';
@@ -1852,7 +1853,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       h('div', { class: 'hero' },
         h('div', { class: 'logo', 'aria-hidden': 'true' }, '📚'),
         h('h1', {}, '絵本ラベルメーカー'),
-        h('p', { class: 'sub' }, '絵本の表紙を 25mm 角のラベルにして A4 に印刷')
+        h('p', { class: 'sub' }, '絵本の表紙を 26mm 角のラベルにして A4 に印刷')
       ),
       c.installHint ? h('div', { class: 'install-hint' },
         h('span', {}, 'Safariの共有ボタン →「ホーム画面に追加」で、アプリとして使えます。'),
@@ -1984,7 +1985,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       topbar('絵本の詳細', c.onBack),
       h('div', { class: 'cover-box', 'data-testid': 'cover-box' },
         d.image ? h('img', { src: d.image, alt: '表紙画像' }) : h('div', { class: 'cover-empty' }, '表紙画像なし')),
-      h('p', { class: 'cover-caption' }, 'ラベルは正方形（25mm × 25mm）で印刷されます'),
+      h('p', { class: 'cover-caption' }, 'ラベルは正方形（26mm × 26mm）で印刷されます'),
       amazonLink(d.isbn),
       c.status && c.status.text ? h('p', { class: 'status ' + (c.status.kind || ''), 'data-testid': 'status', 'aria-live': 'polite' }, c.status.text) : null,
       h('div', { class: 'form' },
@@ -2047,8 +2048,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         }, h('img', { src: b.image, alt: b.title || '' }))
       ),
       // 実寸の目安
-      h('div', { class: 'dim dim-h', style: 'left:' + L.left + 'mm;top:' + (L.top - 6) + 'mm;width:' + L.size + 'mm' }, '25mm'),
-      h('div', { class: 'dim dim-v', style: 'left:' + (L.left - 8) + 'mm;top:' + L.top + 'mm;height:' + L.size + 'mm' }, h('span', {}, '25mm'))
+      h('div', { class: 'dim dim-h', style: 'left:' + L.left + 'mm;top:' + (L.top - 6) + 'mm;width:' + L.size + 'mm' }, '26mm'),
+      h('div', { class: 'dim dim-v', style: 'left:' + (L.left - 8) + 'mm;top:' + L.top + 'mm;height:' + L.size + 'mm' }, h('span', {}, '26mm'))
     );
     const wrap = h('div', { class: 'sheet-wrap' }, sheet);
     requestAnimationFrame(() => fitSheet(wrap));
@@ -2059,7 +2060,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       topbar('PDFプレビュー', c.onBack),
       h('p', { class: 'summary' }, 'A4 縦 ・ ', h('strong', {}, String(books.length)), '冊 ・ ', h('strong', {}, String(pages)), 'ページ'),
       wrap,
-      h('p', { class: 'cover-caption' }, '■ 1枚 = 25mm × 25mm（実寸）／ 1ページ最大 ' + L.perPage + ' 枚'),
+      h('p', { class: 'cover-caption' }, '■ 1枚 = 26mm × 26mm（実寸）／ 1ページ最大 ' + L.perPage + ' 枚'),
       pages > 1 ? h('div', { class: 'pager' },
         btn('‹ 前', () => c.onPage(page - 1), 'small', { disabled: page === 0 }),
         h('span', {}, (page + 1) + ' / ' + pages),
@@ -2074,7 +2075,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         btn('共有・保存', c.onShare, 'big')) : null,
       h('div', { class: 'print-note' },
         h('strong', {}, '印刷するとき'),
-        h('p', {}, '「100% / 実際のサイズ」を選んでください。「用紙に合わせる」「拡大/縮小」だと 25mm になりません。'))
+        h('p', {}, '「100% / 実際のサイズ」を選んでください。「用紙に合わせる」「拡大/縮小」だと 26mm になりません。'))
     );
   }
 
@@ -2194,7 +2195,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
 
       frame('s-list', '絵本一覧', '登録済みの絵本をサムネイル付きで表示', V.home({ books }));
 
-      frame('s-pdf', 'PDFプレビュー', 'A4縦に 25mm × 25mm の表紙が並ぶ（寸法は実寸比で表示）',
+      frame('s-pdf', 'PDFプレビュー', 'A4縦に 26mm × 26mm の表紙が並ぶ（寸法は実寸比で表示）',
         V.pdf({ books: manyBooks, cutLines: true, page: 0, busy: false, result: null, onPage() {} }));
     };
 })(window.Ehon = window.Ehon || {});
@@ -2633,7 +2634,7 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
           const { bytes, pageCount } = E.pdf.build(books, { cutLines });
           const blob = new Blob([bytes], { type: 'application/pdf' });
           if (pdfState.result) URL.revokeObjectURL(pdfState.result.url);
-          pdfState.result = { url: URL.createObjectURL(blob), blob, pages: pageCount, size: bytes.length, filename: 'ehon-labels-25mm.pdf' };
+          pdfState.result = { url: URL.createObjectURL(blob), blob, pages: pageCount, size: bytes.length, filename: 'ehon-labels-26mm.pdf' };
         } catch (e) {
           toast('PDFを作成できませんでした: ' + e.message);
         }
