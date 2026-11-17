@@ -1661,18 +1661,19 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
   const MM = 72 / 25.4; // 1mm = 2.8346pt
   const PAGE = { w: 210, h: 297 }; // mm
   const SIZE = 26; // ラベル 1 辺 (mm)
-  const GAP = 8; // ラベル間 (mm)。切り取り線が見えるぶんの余白
+  const MARGIN = 12; // 用紙の外周の余白 (mm)。家庭用プリンタの印刷できない範囲を避ける
   const COLS = 4; // 1 ページ 4 列 × 5 行 = 20 枚
   const ROWS = 5;
 
+  /** 外周の余白を残して、ラベル同士の間隔を A4 いっぱいに広げる（縦と横で別々に計算）。 */
   function layout() {
     const cols = COLS;
     const rows = ROWS;
-    const gridW = cols * SIZE + (cols - 1) * GAP;
-    const gridH = rows * SIZE + (rows - 1) * GAP;
+    const gapX = (PAGE.w - MARGIN * 2 - cols * SIZE) / (cols - 1);
+    const gapY = (PAGE.h - MARGIN * 2 - rows * SIZE) / (rows - 1);
     return {
-      size: SIZE, gap: GAP, cols, rows, perPage: cols * rows,
-      left: (PAGE.w - gridW) / 2, top: (PAGE.h - gridH) / 2,
+      size: SIZE, gapX, gapY, pitchX: SIZE + gapX, pitchY: SIZE + gapY, cols, rows, perPage: cols * rows,
+      left: MARGIN, top: MARGIN, margin: MARGIN,
       pageW: PAGE.w, pageH: PAGE.h,
     };
   }
@@ -1762,8 +1763,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
       const cells = slice.map((_, k) => {
         const col = k % lay.cols;
         const row = Math.floor(k / lay.cols);
-        const x = (lay.left + col * (SIZE + GAP)) * MM;
-        const y = (lay.pageH - (lay.top + row * (SIZE + GAP)) - SIZE) * MM;
+        const x = (lay.left + col * lay.pitchX) * MM;
+        const y = (lay.pageH - (lay.top + row * lay.pitchY) - SIZE) * MM;
         return { x, y, idx: p * lay.perPage + k, k };
       });
       let c = '';
@@ -2043,8 +2044,8 @@ input[type="text"]:focus { outline: none; border-color: var(--primary); }
         h('div', {
           class: 'cell' + (c.cutLines ? ' cut' : ''),
           'data-testid': 'cell',
-          style: 'left:' + (L.left + (k % L.cols) * (L.size + L.gap)) + 'mm;top:' +
-            (L.top + Math.floor(k / L.cols) * (L.size + L.gap)) + 'mm;width:' + L.size + 'mm;height:' + L.size + 'mm',
+          style: 'left:' + (L.left + (k % L.cols) * L.pitchX) + 'mm;top:' +
+            (L.top + Math.floor(k / L.cols) * L.pitchY) + 'mm;width:' + L.size + 'mm;height:' + L.size + 'mm',
         }, h('img', { src: b.image, alt: b.title || '' }))
       ),
       // 実寸の目安
